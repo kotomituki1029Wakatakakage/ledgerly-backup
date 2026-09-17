@@ -1,0 +1,85 @@
+name: Sync Ledgerly investments
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-ledgerly-investments
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Fetch and validate latest portfolio
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL="https://ledgerly-portfolio.kotomituki9201.chatgpt.site/public/investments.json"
+          curl --fail --silent --show-error --location --retry 3 --retry-delay 5 \
+            --connect-timeout 15 --max-time 60 \
+            -H 'Cache-Control: no-cache' \
+            "${URL}?sync=$(date +%s)" -o investments.new.json
+
+          python - <<'PY'
+          import json
+          from datetime import datetime
+          from pathlib import Path
+
+          p = Path('investments.new.json')
+          data = json.loads(p.read_text(encoding='utf-8'))
+          required = ('updatedAt', 'portfolioVersion', 'holdings', 'watchlist', 'cash')
+          missing = [k for k in required if k not in data]
+          if missing:
+              raise SystemExit(f'Missing required fields: {missing}')
+          if not isinstance(data['holdings'], list) or not isinstance(data['watchlist'], list):
+              raise SystemExit('holdings/watchlist must be arrays')
+          if data.get('readerFallback') is True:
+              raise SystemExit('Refusing readerFallback=true data')
+          datetime.fromisoformat(str(data['updatedAt']).replace('Z', '+00:00'))
+          p.write_text(json.dumps(data, ensure_ascii=False, separators=(',', ':')) + '\n', encoding='utf-8')
+          print('validated portfolioVersion=', data['portfolioVersion'], 'updatedAt=', data['updatedAt'])
+          PY
+
+      - name: Replace only when source is newer or equal
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          new = json.loads(Path('investments.new.json').read_text(encoding='utf-8'))
+          old_path = Path('investments.json')
+          if old_path.exists():
+              old = json.loads(old_path.read_text(encoding='utf-8'))
+              old_ver = int(old.get('portfolioVersion', -1))
+              new_ver = int(new.get('portfolioVersion', -1))
+              if new_ver < old_ver:
+                  raise SystemExit(f'Refusing rollback: source version {new_ver} < backup version {old_ver}')
+          old_path.write_text(Path('investments.new.json').read_text(encoding='utf-8'), encoding='utf-8')
+          PY
+          rm investments.new.json
+
+      - name: Commit changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- investments.json; then
+            echo 'No portfolio change.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add investments.json
+          VERSION=$(python -c "import json; print(json.load(open('investments.json', encoding='utf-8'))['portfolioVersion'])")
+          git commit -m "Sync investments.json portfolioVersion ${VERSION}"
+          git push

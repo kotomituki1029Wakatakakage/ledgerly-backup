@@ -2,7 +2,7 @@ name: Sync Ledgerly investments
 
 on:
   schedule:
-    - cron: '*/30 * * * *'
+    - cron: '17,47 * * * *'
   workflow_dispatch:
 
 permissions:
